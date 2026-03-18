@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.backends._legacy:_Backend"
+
+[project]
+name = "citebot"
+version = "0.1.0"
+description = "Intelligent LaTeX citation assistant"
+requires-python = ">=3.11"
+dependencies = [
+    "opencite>=0.3.0",
+    "bibtexparser>=1.4.4",
+    "keybert>=0.9.0",
+    "yake>=0.7.3",
+    "scholarly>=1.7.11",
+    "spacy>=3.8.0",
+    "rapidfuzz>=3.14.0",
+    "click>=8.3.0",
+    "rich>=14.0.0",
+    "httpx[socks]",
+]
+
+[project.scripts]
+citebot = "citebot.main:main"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+
+[tool.coverage.run]
+source = ["citebot"]

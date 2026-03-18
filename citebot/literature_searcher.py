@@ -88,14 +88,22 @@ def _build_search_queries(
 ) -> tuple[str, ...]:
     """Build search queries of varying specificity from keywords.
 
+    Scales max_queries based on keyword count:
+      - <=15 keywords: up to 5 queries (default)
+      - >15 keywords: up to max(5, num_keywords // 3) queries
+
     Strategy:
-      - Query 1: Top 3 keywords combined (broad)
-      - Query 2-3: Pairs of top keywords (medium)
-      - Query 4-5: Individual high-scoring keywords (targeted)
+      - Broad: top 3 keywords combined
+      - Medium: pairs of keywords
+      - Targeted: individual keywords
     """
     kw_list = [kw for kw, _score in keywords.keywords]
     if not kw_list:
         return ()
+
+    # Scale queries for large keyword sets
+    if len(kw_list) > 15:
+        max_queries = max(max_queries, len(kw_list) // 3)
 
     queries: list[str] = []
 
@@ -105,14 +113,14 @@ def _build_search_queries(
     elif kw_list:
         queries.append(" ".join(kw_list))
 
-    # Medium: pairs
-    pairs = [(0, 1), (0, 2), (1, 2)]
-    for i, j in pairs:
-        if j < len(kw_list) and len(queries) < max_queries:
-            queries.append(f"{kw_list[i]} {kw_list[j]}")
+    # Medium: pairs from top keywords
+    for i in range(min(len(kw_list), 10)):
+        for j in range(i + 1, min(len(kw_list), 10)):
+            if len(queries) < max_queries:
+                queries.append(f"{kw_list[i]} {kw_list[j]}")
 
-    # Targeted: individual keywords (skip those already in combined)
-    for kw in kw_list[3:6]:
+    # Targeted: individual keywords
+    for kw in kw_list:
         if len(queries) < max_queries:
             queries.append(kw)
 

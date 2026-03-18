@@ -8,7 +8,7 @@ from pathlib import Path
 
 from rapidfuzz import fuzz
 
-from citebot.types import ScoredPaper, TexDocument
+from citebot.types import ScoredPaper, TexDocument, TexProject
 
 logger = logging.getLogger(__name__)
 
@@ -39,6 +39,29 @@ def insert_citations(
 
     tex_content = _ensure_bibliography_command(tex_content, bib_filename)
     return tex_content
+
+
+def insert_citations_project(
+    project: TexProject,
+    scored_papers: tuple[ScoredPaper, ...],
+    bib_filename: str = "references",
+) -> list[str]:
+    """Insert citations into all files of a multi-file project.
+
+    Returns list of written .cited.tex file paths.
+    """
+    written: list[str] = []
+
+    for doc in project.all_docs:
+        modified = insert_citations(doc, scored_papers, bib_filename)
+        # Only write if something was actually changed
+        original_content = Path(doc.file_path).read_text(encoding="utf-8")
+        if modified != original_content:
+            path = write_modified_tex(modified, doc.file_path)
+            written.append(path)
+
+    logger.info("Inserted citations into %d/%d files", len(written), len(project.all_docs))
+    return written
 
 
 def write_modified_tex(content: str, original_path: str) -> str:

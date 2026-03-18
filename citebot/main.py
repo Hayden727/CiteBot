@@ -59,12 +59,13 @@ def main(
 ) -> None:
     """CiteBot: Intelligent LaTeX citation assistant.
 
-    Reads a .tex file, extracts keywords, searches academic databases,
-    and generates a .bib file with relevant references.
+    Reads a .tex file (auto-tracking \\input/\\include for multi-file projects),
+    extracts keywords, searches academic databases, and generates a .bib file.
 
     \b
-    Example:
+    Examples:
         citebot paper.tex --num-refs 30 --output refs.bib
+        citebot main.tex -n 100 -o refs.bib --sources s2,openalex,arxiv
     """
     parsed_sources = (
         tuple(s.strip() for s in sources.split(",") if s.strip())
@@ -107,14 +108,22 @@ def _print_summary(result, verbose: bool) -> None:
     console.print("[bold green]CiteBot complete![/bold green]")
     console.print()
 
+    # Project info
+    project = result.project
+    if project.is_multi_file:
+        console.print(f"[bold]Project:[/bold] {len(project.all_docs)} files parsed")
+
     # Keywords
     kw_display = ", ".join(kw for kw, _ in result.keywords.keywords[:8])
     console.print(f"[bold]Keywords:[/bold] {kw_display}")
+    if len(result.keywords.keywords) > 8:
+        console.print(f"[dim]  ... and {len(result.keywords.keywords) - 8} more[/dim]")
     console.print(f"[bold]Papers found:[/bold] {len(result.papers)}")
     console.print(f"[bold]BibTeX file:[/bold] {result.output_path}")
 
     if result.inserted_cites:
-        console.print("[bold]Citations:[/bold] Inserted into .cited.tex")
+        n_files = len(project.all_docs) if project.is_multi_file else 1
+        console.print(f"[bold]Citations:[/bold] Inserted into {n_files} .cited.tex file(s)")
 
     if verbose and result.papers:
         console.print()

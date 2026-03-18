@@ -8,7 +8,7 @@ import os
 import re
 from collections import defaultdict
 
-from citebot.types import ExtractedKeywords, KeywordExtractionError, TexDocument
+from citebot.types import ExtractedKeywords, KeywordExtractionError, TexDocument, TexProject
 
 logger = logging.getLogger(__name__)
 
@@ -19,7 +19,7 @@ _WEIGHT_SPACY = 0.2
 
 
 def extract_keywords(document: TexDocument, top_n: int = 15) -> ExtractedKeywords:
-    """Extract keywords from a parsed TeX document.
+    """Extract keywords from a single TeX document.
 
     Strategy:
       1. Try LLM extraction first (best for multilingual / domain-specific docs)
@@ -32,14 +32,79 @@ def extract_keywords(document: TexDocument, top_n: int = 15) -> ExtractedKeyword
     if not text.strip():
         raise KeywordExtractionError("No text available for keyword extraction")
 
-    # --- Strategy 1: LLM extraction (preferred) ---
-    llm_result = _try_llm_extraction(document, top_n)
+    llm_result = _try_llm_extraction(document.title, text, top_n)
     if llm_result is not None:
         return llm_result
 
-    # --- Strategy 2: NLP ensemble fallback ---
     logger.info("LLM extraction unavailable, using NLP ensemble fallback")
     return _extract_ensemble(text, top_n)
+
+
+def extract_keywords_from_project(
+    project: TexProject, top_n: int = 15,
+) -> ExtractedKeywords:
+    """Extract keywords from a multi-file LaTeX project.
+
+    For large projects (>6000 chars), extracts keywords from each chapter
+    separately via LLM, then merges and deduplicates.
+
+    Raises:
+        KeywordExtractionError: If all methods fail.
+    """
+    combined_text = project.combined_full_text
+    if not combined_text.strip():
+        raise KeywordExtractionError("No text available for keyword extraction")
+
+    # For single-file or small projects, use standard extraction
+    if not project.is_multi_file or len(combined_text) <= 8000:
+        llm_result = _try_llm_extraction(project.combined_title, combined_text, top_n)
+        if llm_result is not None:
+            return llm_result
+        return _extract_ensemble(combined_text, top_n)
+
+    # --- Multi-file chunked LLM extraction ---
+    api_key, base_url, model = _resolve_llm_config()
+    if not api_key:
+        logger.info("No LLM API for chunked extraction, using ensemble on combined text")
+        return _extract_ensemble(combined_text[:100_000], top_n)
+
+    # Extract per-chapter keywords, then merge
+    all_keywords: dict[str, float] = defaultdict(float)
+    n_chunks = 0
+
+    for doc in project.all_docs:
+        if not doc.full_text or len(doc.full_text.strip()) < 100:
+            continue
+
+        chapter_title = doc.title or "Untitled Chapter"
+        # Each chapter gets a proportional share of keywords
+        per_chapter_n = max(top_n // max(len(project.all_docs), 1), 10)
+
+        result = _try_llm_extraction(
+            f"{project.combined_title} - {chapter_title}",
+            doc.full_text,
+            per_chapter_n,
+        )
+        if result is not None:
+            n_chunks += 1
+            for kw, score in result.keywords:
+                key = kw.lower().strip()
+                all_keywords[key] = max(all_keywords[key], score)
+            logger.debug(
+                "Chapter %r: %d keywords", chapter_title[:30], len(result.keywords)
+            )
+
+    if not all_keywords:
+        logger.warning("Chunked LLM extraction returned nothing, falling back to ensemble")
+        return _extract_ensemble(combined_text[:100_000], top_n)
+
+    # Sort and take top_n
+    ranked = sorted(all_keywords.items(), key=lambda x: x[1], reverse=True)[:top_n]
+    logger.info(
+        "Merged keywords from %d chapters: %d unique -> top %d",
+        n_chunks, len(all_keywords), len(ranked),
+    )
+    return ExtractedKeywords(keywords=tuple(ranked), source_method="llm")
 
 
 # ---------------------------------------------------------------------------
@@ -65,7 +130,8 @@ Return ONLY a JSON array of strings, no explanation. Example: ["deep learning", 
 
 
 def _try_llm_extraction(
-    document: TexDocument,
+    title: str,
+    full_text: str,
     top_n: int,
 ) -> ExtractedKeywords | None:
     """Try to extract keywords using an LLM API.
@@ -83,10 +149,9 @@ def _try_llm_extraction(
     try:
         import httpx
 
-        # Build prompt with truncated text
-        text_excerpt = document.full_text[:6000]
+        text_excerpt = full_text[:6000]
         prompt = _LLM_PROMPT_TEMPLATE.format(
-            title=document.title,
+            title=title,
             text=text_excerpt,
             top_n=top_n,
         )

@@ -4,7 +4,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from citebot.types import ExtractedKeywords, PipelineResult, TexDocument
+from citebot.types import ExtractedKeywords, PipelineResult, TexDocument, TexProject
 
 
 class TestPipelineIntegration:
@@ -39,6 +39,7 @@ class TestPipelineIntegration:
         result = run_pipeline(sample_tex_path, config)
 
         assert isinstance(result, PipelineResult)
+        assert isinstance(result.project, TexProject)
         assert len(result.keywords.keywords) > 0
         assert len(result.papers) > 0
         assert result.inserted_cites is False

@@ -5,7 +5,7 @@
 ## 功能特性
 
 - **LaTeX 文档解析** — 从 `.tex` 文件中提取标题、摘要、章节结构和已有引用
-- **集成关键词提取** — 融合 KeyBERT（语义）、YAKE（统计）和 spaCy（NLP）三种方法，关键词识别更准确
+- **LLM 驱动的关键词提取** — 优先使用 DeepSeek/OpenAI 理解文档语义，精准提取英文学术术语；未配置 LLM 时回退到 NLP 集成方案（KeyBERT + YAKE + spaCy）。原生支持中文等非英文文档
 - **多源并行搜索** — 同时查询 OpenAlex、Semantic Scholar、PubMed、arXiv 和 BioRxiv
 - **智能排序** — 基于关键词匹配度、引用量、时效性和摘要相似度的综合评分
 - **自动去重** — 基于 DOI 和模糊标题匹配消除重复结果
@@ -43,13 +43,14 @@ cp .env.example .env
 
 | 变量 | 用途 |
 |------|------|
-| `SEMANTIC_SCHOLAR_API_KEY` | Semantic Scholar API 访问 |
-| `PUBMED_API_KEY` | PubMed/NCBI 访问 |
-| `OPENALEX_API_KEY` | OpenAlex 高速访问 |
+| `DEEPSEEK_API_KEY` | **推荐** — LLM 关键词提取（中文文档效果极佳） |
+| `OPENAI_API_KEY` | 替代 LLM 方案（可配合 `OPENAI_BASE_URL` 和 `OPENAI_MODEL` 使用兼容 API） |
+| `SEMANTIC_SCHOLAR_API_KEY` | Semantic Scholar API 访问（免费，CS 方向推荐） |
+| `OPENCITE_EMAIL` | OpenAlex 礼貌池联系邮箱（提高请求速率） |
 | `CROSSREF_EMAIL` | CrossRef 礼貌池 |
-| `OPENCITE_EMAIL` | API 请求头中的联系邮箱 |
+| `PUBMED_API_KEY` | PubMed/NCBI 访问 |
 
-不配置 API 密钥也可以使用，但请求频率会受到更严格的限制。
+不配置 API 密钥也可以使用，但关键词质量和搜索速率会受影响。
 
 ## 使用方法
 
@@ -108,7 +109,7 @@ citebot paper.tex -n 20 -o refs.bib -v
 ```
 
 1. **解析** — 读取 `.tex` 文件，提取标题、摘要、章节结构和纯文本
-2. **提取关键词** — 三种提取器集成运行（KeyBERT、YAKE、spaCy），加权合并结果
+2. **提取关键词** — 优先使用 LLM（DeepSeek/OpenAI）语义理解提取关键词，无 LLM 时回退到 NLP 集成方案（KeyBERT + YAKE + spaCy）
 3. **搜索文献** — 根据关键词构建 3-5 个不同粒度的查询，通过 OpenCite 并行搜索学术数据库
 4. **排序筛选** — 去重后对每篇文献综合评分：关键词匹配度（40%）、引用量（25%）、时效性（20%）、摘要相似度（15%）
 5. **生成 BibTeX** — 优先通过 DOI 获取权威 BibTeX 条目，获取失败则基于元数据生成
@@ -123,7 +124,7 @@ CiteBot/
 │   ├── types.py                 不可变数据类型 + 异常层级
 │   ├── config.py                配置管理（OpenCite + CLI 参数）
 │   ├── latex_parser.py          .tex 文件解析
-│   ├── keyword_extractor.py     集成关键词提取
+│   ├── keyword_extractor.py     LLM 优先关键词提取 + NLP 回退
 │   ├── literature_searcher.py   异步多源搜索
 │   ├── filter_ranker.py         去重 + 综合评分排序
 │   ├── bib_generator.py         BibTeX 生成 + 校验

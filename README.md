@@ -5,7 +5,7 @@ An intelligent citation assistant that automatically analyzes your LaTeX documen
 ## Features
 
 - **LaTeX Parsing** — Extracts title, abstract, sections, and existing citations from `.tex` files
-- **Ensemble Keyword Extraction** — Combines KeyBERT (semantic), YAKE (statistical), and spaCy (NLP) for robust keyword identification
+- **LLM-Powered Keyword Extraction** — Uses DeepSeek/OpenAI to understand document semantics and extract precise English academic terms; falls back to NLP ensemble (KeyBERT + YAKE + spaCy) when no LLM API is configured. Handles Chinese and other non-English documents natively
 - **Multi-Source Search** — Queries OpenAlex, Semantic Scholar, PubMed, arXiv, and BioRxiv in parallel
 - **Smart Ranking** — Composite scoring based on keyword overlap, citation count, recency, and abstract similarity
 - **Deduplication** — DOI-based and fuzzy title matching to eliminate duplicate results
@@ -43,13 +43,14 @@ Available keys:
 
 | Variable | Purpose |
 |----------|---------|
-| `SEMANTIC_SCHOLAR_API_KEY` | Semantic Scholar API access |
-| `PUBMED_API_KEY` | PubMed/NCBI access |
-| `OPENALEX_API_KEY` | OpenAlex polite pool |
+| `DEEPSEEK_API_KEY` | **Recommended** — LLM keyword extraction (great for non-English docs) |
+| `OPENAI_API_KEY` | Alternative LLM provider (set `OPENAI_BASE_URL` and `OPENAI_MODEL` for compatible APIs) |
+| `SEMANTIC_SCHOLAR_API_KEY` | Semantic Scholar API access (free, recommended for CS) |
+| `OPENCITE_EMAIL` | Contact email for OpenAlex polite pool (higher rate limits) |
 | `CROSSREF_EMAIL` | CrossRef polite pool |
-| `OPENCITE_EMAIL` | Contact email for API headers |
+| `PUBMED_API_KEY` | PubMed/NCBI access |
 
-CiteBot works without API keys, but requests will be rate-limited more aggressively.
+CiteBot works without API keys, but keyword quality and search rate limits will be degraded.
 
 ## Usage
 
@@ -108,7 +109,7 @@ citebot paper.tex -n 20 -o refs.bib -v
 ```
 
 1. **Parse** — Reads your `.tex` file and extracts the title, abstract, section structure, and plain text
-2. **Extract Keywords** — Runs three extractors in ensemble (KeyBERT, YAKE, spaCy) with weighted merging
+2. **Extract Keywords** — Uses LLM (DeepSeek/OpenAI) for semantic keyword extraction, with NLP ensemble fallback (KeyBERT + YAKE + spaCy)
 3. **Search** — Builds 3-5 queries of varying specificity and searches academic databases in parallel via OpenCite
 4. **Rank & Filter** — Deduplicates results and scores each paper on keyword overlap (40%), citation count (25%), recency (20%), and abstract similarity (15%)
 5. **Generate** — Fetches authoritative BibTeX entries via DOI, falling back to metadata-based generation
@@ -123,7 +124,7 @@ CiteBot/
 │   ├── types.py                 Frozen dataclasses + exception hierarchy
 │   ├── config.py                Configuration (OpenCite + CLI params)
 │   ├── latex_parser.py          .tex file parsing
-│   ├── keyword_extractor.py     Ensemble keyword extraction
+│   ├── keyword_extractor.py     LLM-first keyword extraction + NLP fallback
 │   ├── literature_searcher.py   Async multi-source search
 │   ├── filter_ranker.py         Deduplication + composite scoring
 │   ├── bib_generator.py         BibTeX generation + validation

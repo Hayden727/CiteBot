@@ -79,13 +79,14 @@ CiteBot automates the tedious process of finding and formatting references for a
 
 ## Features
 
+- **Multi-File Project Support** &mdash; Pass your main `.tex` file **or a project directory** and CiteBot automatically tracks `\input{}`/`\include{}` to parse the entire project. Generates one unified `.bib` and inserts citations into each chapter file
 - **LaTeX Parsing** &mdash; Extracts title, abstract, sections, and existing citations from `.tex` files (supports `\chapter`, `\section`, Chinese documents)
-- **LLM-Powered Keyword Extraction** &mdash; Uses DeepSeek/OpenAI to understand document semantics and extract precise English academic terms; falls back to NLP ensemble (KeyBERT + YAKE + spaCy) when no LLM API is configured
+- **LLM-Powered Keyword Extraction** &mdash; Uses DeepSeek/OpenAI to understand document semantics and extract precise English academic terms; per-chapter chunked extraction for large projects (100+ keywords). Falls back to NLP ensemble (KeyBERT + YAKE + spaCy) when no LLM API is configured
 - **Multi-Source Search** &mdash; Queries OpenAlex, Semantic Scholar, PubMed, arXiv, and BioRxiv in parallel via OpenCite
 - **Smart Ranking** &mdash; Composite scoring: keyword overlap (40%), citation count (25%), recency (20%), abstract similarity (15%)
 - **Deduplication** &mdash; DOI-based and fuzzy title matching to eliminate duplicates
 - **BibTeX Generation** &mdash; Fetches authoritative BibTeX via DOI content negotiation with metadata fallback
-- **Citation Insertion** &mdash; Optionally inserts `\cite{}` commands into your document (writes to `.cited.tex`, never overwrites the original)
+- **Citation Insertion** &mdash; Optionally inserts `\cite{}` commands into your document (writes to `.cited.tex`, never overwrites the original). For multi-file projects, each chapter gets its own `.cited.tex`
 
 ## Getting Started
 
@@ -129,18 +130,21 @@ cp .env.example .env
 ### Basic Usage
 
 ```bash
-# Generate 30 references for your paper
+# Single-file paper: generate 30 references
 citebot paper.tex --num-refs 30 --output references.bib
 
-# Short flags
-citebot paper.tex -n 30 -o refs.bib
+# Multi-file thesis: pass the main file, auto-tracks \input/\include
+citebot main.tex -n 100 -o references.bib -k 50
 ```
 
 ### Advanced Options
 
 ```bash
-# Insert \cite{} commands into the document
-citebot paper.tex -n 50 -o refs.bib --insert-cites
+# Pass a directory — auto-finds main.tex / thesis.tex inside
+citebot thesis/ -n 100 -o refs.bib
+
+# Insert \cite{} into each chapter file (writes .cited.tex copies)
+citebot main.tex -n 100 -o refs.bib --insert-cites
 
 # Filter by year range
 citebot paper.tex --year-from 2020 --year-to 2025
@@ -180,12 +184,12 @@ citebot paper.tex -n 20 -o refs.bib -v
                                                                 └──────────┘
 ```
 
-1. **Parse** &mdash; Reads your `.tex` file and extracts the title, abstract, section structure, and plain text
-2. **Extract Keywords** &mdash; Uses LLM (DeepSeek/OpenAI) for semantic keyword extraction, with NLP ensemble fallback (KeyBERT + YAKE + spaCy)
-3. **Search** &mdash; Builds 3-5 queries of varying specificity and searches academic databases in parallel via OpenCite
+1. **Parse** &mdash; Reads your `.tex` file (or directory), auto-tracks `\input{}`/`\include{}` for multi-file projects, extracts title, abstract, sections from all files
+2. **Extract Keywords** &mdash; Uses LLM (DeepSeek/OpenAI) for semantic keyword extraction; for multi-file projects, extracts per-chapter then merges (100+ keywords). NLP ensemble fallback (KeyBERT + YAKE + spaCy)
+3. **Search** &mdash; Builds queries scaled to keyword count and searches academic databases in parallel via OpenCite
 4. **Rank & Filter** &mdash; Deduplicates results and scores each paper on keyword overlap (40%), citation count (25%), recency (20%), and abstract similarity (15%)
 5. **Generate** &mdash; Fetches authoritative BibTeX entries via DOI, falling back to metadata-based generation
-6. **Insert** (optional) &mdash; Adds `\cite{}` commands at relevant positions in a copy of your document
+6. **Insert** (optional) &mdash; Adds `\cite{}` commands at relevant positions in each file (`.cited.tex` copies)
 
 ## Data Sources
 

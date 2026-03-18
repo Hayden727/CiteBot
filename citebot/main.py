@@ -8,6 +8,8 @@ import click
 from rich.console import Console
 from rich.table import Table
 
+from pathlib import Path
+
 from citebot.config import build_config
 from citebot.pipeline import run_pipeline
 from citebot.types import CiteBotError, SearchError, TexParseError
@@ -16,7 +18,7 @@ console = Console()
 
 
 @click.command()
-@click.argument("tex_file", type=click.Path(exists=True, dir_okay=False))
+@click.argument("tex_file", type=click.Path(exists=True))
 @click.option(
     "--num-refs", "-n", default=30, show_default=True,
     help="Number of references to find.",
@@ -67,6 +69,9 @@ def main(
         citebot paper.tex --num-refs 30 --output refs.bib
         citebot main.tex -n 100 -o refs.bib --sources s2,openalex,arxiv
     """
+    # Resolve directory input to main .tex file
+    resolved_tex = _resolve_input(tex_file)
+
     parsed_sources = (
         tuple(s.strip() for s in sources.split(",") if s.strip())
         if sources
@@ -85,7 +90,7 @@ def main(
             verbose=verbose,
         )
 
-        result = run_pipeline(tex_file, config)
+        result = run_pipeline(resolved_tex, config)
         _print_summary(result, verbose)
 
     except TexParseError as exc:
@@ -142,6 +147,41 @@ def _print_summary(result, verbose: bool) -> None:
             )
 
         console.print(table)
+
+
+def _resolve_input(tex_file: str) -> str:
+    """Resolve input path: if directory, find the main .tex file inside it."""
+    path = Path(tex_file)
+
+    if path.is_file():
+        return str(path)
+
+    if path.is_dir():
+        # Look for common main file names
+        for name in ("main.tex", "thesis.tex", "paper.tex", "document.tex"):
+            candidate = path / name
+            if candidate.is_file():
+                console.print(f"[dim]Found main file: {candidate}[/dim]")
+                return str(candidate)
+
+        # Fall back to any .tex file containing \documentclass
+        for tex in sorted(path.glob("*.tex")):
+            content = tex.read_text(encoding="utf-8", errors="ignore")[:2000]
+            if r"\documentclass" in content:
+                console.print(f"[dim]Found main file: {tex}[/dim]")
+                return str(tex)
+
+        # Last resort: first .tex file
+        tex_files = sorted(path.glob("*.tex"))
+        if tex_files:
+            console.print(f"[dim]Using first .tex file: {tex_files[0]}[/dim]")
+            return str(tex_files[0])
+
+        console.print(f"[red]No .tex files found in {path}[/red]")
+        raise SystemExit(1)
+
+    console.print(f"[red]Path not found: {path}[/red]")
+    raise SystemExit(1)
 
 
 if __name__ == "__main__":

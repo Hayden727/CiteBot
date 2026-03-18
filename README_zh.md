@@ -79,13 +79,14 @@ CiteBot 将论文写作中最繁琐的文献调研与引用流程自动化。只
 
 ## 功能特性
 
+- **多文件项目支持** &mdash; 传入主 `.tex` 文件或项目目录，自动追踪 `\input{}`/`\include{}` 解析整个论文项目。生成统一的 `.bib` 文件，并在每个章节文件中插入引用
 - **LaTeX 文档解析** &mdash; 从 `.tex` 文件中提取标题、摘要、章节结构和已有引用（支持 `\chapter`、`\section`、中文文档）
-- **LLM 驱动的关键词提取** &mdash; 优先使用 DeepSeek/OpenAI 理解文档语义，精准提取英文学术术语；未配置 LLM 时回退到 NLP 集成方案（KeyBERT + YAKE + spaCy）
+- **LLM 驱动的关键词提取** &mdash; 优先使用 DeepSeek/OpenAI 理解文档语义，精准提取英文学术术语；大型项目按章节分块提取后合并（支持 100+ 关键词）。未配置 LLM 时回退到 NLP 集成方案（KeyBERT + YAKE + spaCy）
 - **多源并行搜索** &mdash; 通过 OpenCite 同时查询 OpenAlex、Semantic Scholar、PubMed、arXiv 和 BioRxiv
 - **智能排序** &mdash; 综合评分：关键词匹配度（40%）、引用量（25%）、时效性（20%）、摘要相似度（15%）
 - **自动去重** &mdash; 基于 DOI 和模糊标题匹配消除重复结果
 - **BibTeX 生成** &mdash; 优先通过 DOI 内容协商获取权威 BibTeX，元数据生成兜底
-- **引用插入** &mdash; 可选功能：在文档中插入 `\cite{}` 命令（写入 `.cited.tex`，不覆盖原文件）
+- **引用插入** &mdash; 可选功能：在文档中插入 `\cite{}` 命令（写入 `.cited.tex`，不覆盖原文件）。多文件项目中每个章节文件各自生成 `.cited.tex`
 
 ## 快速上手
 
@@ -129,18 +130,21 @@ cp .env.example .env
 ### 基本用法
 
 ```bash
-# 为论文生成 30 篇参考文献
+# 单文件论文：生成 30 篇参考文献
 citebot paper.tex --num-refs 30 --output references.bib
 
-# 简写形式
-citebot paper.tex -n 30 -o refs.bib
+# 多文件毕业论文：传入主文件，自动追踪 \input/\include
+citebot main.tex -n 100 -o references.bib -k 50
 ```
 
 ### 进阶用法
 
 ```bash
-# 自动在文档中插入 \cite{} 命令
-citebot paper.tex -n 50 -o refs.bib --insert-cites
+# 在每个章节文件中插入 \cite{}（生成 .cited.tex 副本）
+citebot main.tex -n 100 -o refs.bib --insert-cites
+
+# 传入目录，自动查找主 .tex 文件
+citebot thesis/ -n 100 -o refs.bib
 
 # 限定年份范围
 citebot paper.tex --year-from 2020 --year-to 2025
@@ -180,12 +184,12 @@ citebot paper.tex -n 20 -o refs.bib -v
                                                                └──────────┘
 ```
 
-1. **解析** &mdash; 读取 `.tex` 文件，提取标题、摘要、章节结构和纯文本
-2. **提取关键词** &mdash; 优先使用 LLM（DeepSeek/OpenAI）语义理解提取关键词，无 LLM 时回退到 NLP 集成方案（KeyBERT + YAKE + spaCy）
-3. **搜索文献** &mdash; 根据关键词构建 3-5 个不同粒度的查询，通过 OpenCite 并行搜索学术数据库
+1. **解析** &mdash; 读取 `.tex` 文件（或目录），自动追踪 `\input{}`/`\include{}` 解析多文件项目，提取所有文件的标题、摘要和章节内容
+2. **提取关键词** &mdash; 优先使用 LLM（DeepSeek/OpenAI）语义理解提取关键词；多文件项目按章节分块提取后合并（支持 100+ 关键词）。无 LLM 时回退到 NLP 集成方案
+3. **搜索文献** &mdash; 根据关键词数量自动扩展查询数，通过 OpenCite 并行搜索学术数据库
 4. **排序筛选** &mdash; 去重后对每篇文献综合评分：关键词匹配度（40%）、引用量（25%）、时效性（20%）、摘要相似度（15%）
 5. **生成 BibTeX** &mdash; 优先通过 DOI 获取权威 BibTeX 条目，获取失败则基于元数据生成
-6. **插入引用**（可选）&mdash; 在文档副本的相关位置添加 `\cite{}` 命令
+6. **插入引用**（可选）&mdash; 在每个文件的相关位置添加 `\cite{}` 命令（各自生成 `.cited.tex` 副本）
 
 ## 数据源
 

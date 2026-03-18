@@ -95,8 +95,11 @@ def _strip_comments(tex: str) -> str:
 
 
 def _extract_title(tex: str) -> str:
-    r"""Extract content of \title{...}, handling nested braces."""
-    return _extract_braced_arg(tex, r"\\title")
+    r"""Extract content of \title{...} or \chapter{...}, handling nested braces."""
+    title = _extract_braced_arg(tex, r"\\title")
+    if not title:
+        title = _extract_braced_arg(tex, r"\\chapter")
+    return title
 
 
 def _extract_abstract(tex: str) -> str:
@@ -177,19 +180,39 @@ def _extract_braced_arg(tex: str, command_pattern: str) -> str:
 def _strip_latex_commands(tex: str) -> str:
     """Remove LaTeX commands and markup, keeping plain text."""
     text = tex
-    # Remove environments (begin/end)
+    # Remove entire environments that don't contain useful prose
+    for env in ("figure", "table", "tabular", "lstlisting", "equation", "align", "tikzpicture"):
+        text = re.sub(
+            rf"\\begin\{{{env}\}}.*?\\end\{{{env}\}}",
+            " ",
+            text,
+            flags=re.DOTALL,
+        )
+    # Remove \label{...}, \ref{...}, \cref{...} entirely
+    text = re.sub(r"\\(?:label|ref|cref|eqref|autoref|pageref)\{[^}]*\}", " ", text)
+    # Remove \cite{...} etc.
+    text = re.sub(r"\\cite[pt]?\{[^}]*\}", " ", text)
+    # Remove \includegraphics[...]{...}
+    text = re.sub(r"\\includegraphics\[[^\]]*\]\{[^}]*\}", " ", text)
+    # Remove remaining begin/end
     text = re.sub(r"\\(?:begin|end)\{[^}]*\}", "", text)
     # Remove display math
     text = re.sub(r"\\\[.*?\\\]", " ", text, flags=re.DOTALL)
     text = re.sub(r"\$\$.*?\$\$", " ", text, flags=re.DOTALL)
     # Remove inline math
     text = re.sub(r"\$[^$]+\$", " ", text)
+    # Remove \cde{...} -> keep content (common in Chinese CS papers)
+    text = re.sub(r"\\cde\{([^}]*)\}", r"\1", text)
     # Remove commands with braced args (keep the arg text): \textbf{word} -> word
     text = re.sub(r"\\[a-zA-Z]+\{([^}]*)\}", r"\1", text)
     # Remove commands without args: \maketitle, \noindent, etc.
     text = re.sub(r"\\[a-zA-Z]+\*?\s*", " ", text)
     # Remove remaining braces
     text = text.replace("{", "").replace("}", "")
+    # Remove LaTeX structural tokens that leak through
+    text = re.sub(r"~", " ", text)
+    text = re.sub(r"\\\\", " ", text)
+    text = re.sub(r"&", " ", text)
     # Collapse whitespace
     text = re.sub(r"\s+", " ", text)
     return text.strip()

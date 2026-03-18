@@ -189,3 +189,102 @@ class TestFilterAndRank:
         result = filter_and_rank(mock_papers, sample_keywords, sample_document, num_refs=10)
         keys = [sp.cite_key for sp in result]
         assert len(keys) == len(set(keys))
+
+
+class TestKeywordOverlapReturnType:
+    def test_returns_score_and_count(self, mock_paper, sample_keywords):
+        result = _compute_keyword_overlap(mock_paper, sample_keywords)
+        assert isinstance(result, tuple)
+        assert len(result) == 2
+        score, count = result
+        assert isinstance(score, float)
+        assert isinstance(count, int)
+        assert 0.0 <= score <= 1.0
+        assert count >= 0
+
+    def test_count_matches_expected(self, mock_paper, sample_keywords):
+        # mock_paper has "deep learning", "protein structure prediction",
+        # "transformer" in title+abstract
+        _score, count = _compute_keyword_overlap(mock_paper, sample_keywords)
+        assert count >= 2  # at least deep learning + protein structure prediction
+
+
+class TestFilterThreshold:
+    def test_filters_irrelevant_paper(self, sample_keywords, sample_document):
+        """A paper with no keyword matches should be filtered out."""
+        from dataclasses import dataclass
+
+        @dataclass
+        class IrrelevantIDSet:
+            doi: str = "10.9999/irrelevant"
+            pmid: str = ""
+            pmcid: str = ""
+            openalex_id: str = ""
+            s2_id: str = ""
+            arxiv_id: str = ""
+
+        @dataclass
+        class IrrelevantAuthor:
+            name: str = "Nobody"
+            family_name: str = "Nobody"
+            given_name: str = "A"
+            orcid: str = ""
+            openalex_id: str = ""
+            s2_id: str = ""
+
+            def citation_name(self) -> str:
+                return "Nobody, A."
+
+        @dataclass
+        class IrrelevantPaper:
+            title: str = "YOLOv10: Real-Time Object Detection"
+            authors: list = None
+            year: int = 2024
+            abstract: str = "We present improvements to the YOLO architecture for faster detection."
+            citation_count: int = 50000
+            ids: IrrelevantIDSet = None
+            keywords: list = None
+            url: str = ""
+            pdf_locations: list = None
+            is_oa: bool = False
+            influential_citation_count: int = 0
+            is_retracted: bool = False
+            source_venue: object = None
+            publication_date: str = ""
+            pub_type: str = "article"
+            tldr: str = ""
+            mesh_terms: list = None
+            topics: list = None
+            _bibtex: str = ""
+
+            def __post_init__(self):
+                if self.authors is None:
+                    self.authors = [IrrelevantAuthor()]
+                if self.ids is None:
+                    self.ids = IrrelevantIDSet()
+                if self.keywords is None:
+                    self.keywords = []
+                if self.pdf_locations is None:
+                    self.pdf_locations = []
+                if self.mesh_terms is None:
+                    self.mesh_terms = []
+                if self.topics is None:
+                    self.topics = []
+
+        result = filter_and_rank(
+            [IrrelevantPaper()], sample_keywords, sample_document, num_refs=10
+        )
+        # Irrelevant paper should be filtered out despite high citations
+        assert len(result) == 0
+
+    def test_relaxed_threshold_few_keywords(self, mock_paper, sample_document):
+        """With < 5 keywords, papers matching only 1 keyword should still pass."""
+        few_keywords = ExtractedKeywords(
+            keywords=(
+                ("deep learning", 0.9),
+                ("protein structure", 0.8),
+            ),
+            source_method="test",
+        )
+        result = filter_and_rank([mock_paper], few_keywords, sample_document, num_refs=5)
+        assert len(result) >= 1

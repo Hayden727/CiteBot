@@ -82,20 +82,65 @@ async def _search_single_query(
         raise
 
 
+def _quote_phrase(kw: str) -> str:
+    """Wrap multi-word keywords in quotes so APIs treat them as exact phrases."""
+    return f'"{kw}"' if " " in kw else kw
+
+
+# Generic single words that match too many unrelated papers
+_GENERIC_SINGLE_WORDS = frozenset({
+    "model", "method", "system", "data", "analysis", "approach",
+    "framework", "network", "algorithm", "process", "technique",
+    "structure", "function", "performance", "evaluation", "results",
+    "study", "research", "review", "survey", "design", "code",
+    "learning", "training", "prediction", "detection", "generation",
+    "optimization", "implementation", "application", "comparison",
+    "based", "using", "novel", "new", "improved", "efficient",
+})
+
+
+def _broad_priority(word: str) -> tuple[int, int]:
+    """Sort key: prefer well-known terms for broad queries.
+
+    Priority order (lower = better):
+      1. All-uppercase acronyms — most searchable
+      2. Short terms (≤6 chars) — likely established names
+      3. Everything else — niche/internal terms
+    Within each tier, shorter words come first.
+    """
+    if word.isupper():
+        tier = 0
+    elif len(word) <= 6:
+        tier = 1
+    else:
+        tier = 2
+    return (tier, len(word))
+
+
+def _is_technical_term(word: str) -> bool:
+    """Heuristic: is this single word specific enough to search alone?
+
+    Accepts acronyms, short technical terms, and domain-specific
+    words not in the generic set.
+    """
+    return len(word) > 2 and word.lower() not in _GENERIC_SINGLE_WORDS
+
+
 def _build_search_queries(
     keywords: ExtractedKeywords,
     max_queries: int = 5,
 ) -> tuple[str, ...]:
-    """Build search queries of varying specificity from keywords.
+    """Build search queries with three tiers of specificity.
 
     Scales max_queries based on keyword count:
       - <=15 keywords: up to 5 queries (default)
       - >15 keywords: up to max(5, num_keywords // 3) queries
 
     Strategy:
-      - Broad: top 3 keywords combined
-      - Medium: pairs of keywords
-      - Targeted: individual keywords
+      1. Broad: top short keywords unquoted (high recall)
+      2. Medium: short keyword + quoted phrase (balanced)
+      3. Targeted: individual quoted phrases (high precision)
+      4. Technical singles: domain-specific single words
     """
     kw_list = [kw for kw, _score in keywords.keywords]
     if not kw_list:
@@ -105,24 +150,41 @@ def _build_search_queries(
     if len(kw_list) > 15:
         max_queries = max(max_queries, len(kw_list) // 3)
 
+    # Classify keywords
+    short_kws = [kw for kw in kw_list if " " not in kw]
+    phrase_kws = [kw for kw in kw_list if " " in kw]
+
+    # Sort short keywords: prefer well-known terms (shorter, uppercase/acronyms)
+    # for broad queries; longer/niche terms go to targeted queries
+    broad_shorts = sorted(short_kws, key=_broad_priority)
+    # Sort phrases: shorter phrases first (more likely to be established terms)
+    broad_phrases = sorted(phrase_kws, key=len)
+
     queries: list[str] = []
 
-    # Broad: top 3 combined
-    if len(kw_list) >= 3:
-        queries.append(" ".join(kw_list[:3]))
-    elif kw_list:
-        queries.append(" ".join(kw_list))
+    # Tier 1 — Broad: most general short keywords unquoted (high recall)
+    if broad_shorts:
+        queries.append(" ".join(broad_shorts[:3]))
 
-    # Medium: pairs from top keywords
-    for i in range(min(len(kw_list), 10)):
-        for j in range(i + 1, min(len(kw_list), 10)):
+    # Tier 2 — Medium: general short keyword + quoted phrase (balanced)
+    for s in broad_shorts[:3]:
+        for p in broad_phrases[:3]:
             if len(queries) < max_queries:
-                queries.append(f"{kw_list[i]} {kw_list[j]}")
+                queries.append(f"{s} {_quote_phrase(p)}")
 
-    # Targeted: individual keywords
-    for kw in kw_list:
+    # Tier 3 — Targeted: individual quoted phrases (high precision)
+    for p in phrase_kws:
         if len(queries) < max_queries:
-            queries.append(kw)
+            queries.append(_quote_phrase(p))
+
+    # Tier 4 — Technical singles: domain-specific single words
+    for s in short_kws:
+        if len(queries) < max_queries and _is_technical_term(s):
+            queries.append(s)
+
+    # Fallback: if no short keywords, use top phrases unquoted
+    if not queries and phrase_kws:
+        queries.append(" ".join(phrase_kws[:3]))
 
     # Deduplicate while preserving order
     seen: set[str] = set()

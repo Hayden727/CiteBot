@@ -15,11 +15,17 @@ from citebot.types import ExtractedKeywords, ScoredPaper, TexDocument
 
 logger = logging.getLogger(__name__)
 
-# Scoring weights
-_W_KEYWORD = 0.40
-_W_CITATION = 0.25
-_W_RECENCY = 0.20
-_W_ABSTRACT = 0.15
+# Scoring weights — keyword overlap dominates to keep results on-topic
+_W_KEYWORD = 0.50
+_W_CITATION = 0.15
+_W_RECENCY = 0.15
+_W_ABSTRACT = 0.20
+
+# Minimum keyword overlap to keep a paper (filters off-topic results)
+_MIN_KEYWORD_OVERLAP = 0.10
+
+# Minimum distinct keywords matched (relaxed to 1 when keywords < 5)
+_MIN_KEYWORDS_MATCHED = 1
 
 # Dedup threshold for title similarity
 _TITLE_SIMILARITY_THRESHOLD = 90
@@ -50,11 +56,22 @@ def filter_and_rank(
     current_year = datetime.now().year
     existing_keys: set[str] = set(document.existing_cite_keys)
 
+    # Relax match count for small keyword sets
+    min_matches = 1 if len(keywords.keywords) < 5 else _MIN_KEYWORDS_MATCHED
+
     scored: list[ScoredPaper] = []
+    filtered_out = 0
     for paper in deduped:
-        sp = _score_paper(paper, keywords, document, current_year, existing_keys)
+        kw_score, kw_count = _compute_keyword_overlap(paper, keywords)
+        if kw_score < _MIN_KEYWORD_OVERLAP or kw_count < min_matches:
+            filtered_out += 1
+            continue
+        sp = _score_paper(paper, keywords, document, current_year, existing_keys, kw_score)
         scored.append(sp)
         existing_keys.add(sp.cite_key)
+
+    if filtered_out:
+        logger.info("Filtered out %d papers below minimum relevance threshold", filtered_out)
 
     scored.sort(key=lambda s: s.relevance_score, reverse=True)
     top = tuple(scored[:num_refs])
@@ -117,9 +134,11 @@ def _score_paper(
     document: TexDocument,
     current_year: int,
     existing_keys: set[str],
+    kw_score: float | None = None,
 ) -> ScoredPaper:
     """Compute composite relevance score for a paper."""
-    kw_score = _compute_keyword_overlap(paper, keywords)
+    if kw_score is None:
+        kw_score, _count = _compute_keyword_overlap(paper, keywords)
     rec_score = _compute_recency_score(paper.year, current_year)
     cit_score = _compute_citation_score(paper.citation_count or 0)
     abs_score = _compute_abstract_match(paper, document)
@@ -143,31 +162,77 @@ def _score_paper(
     )
 
 
+_STOPWORDS = frozenset({
+    "a", "an", "the", "of", "in", "for", "and", "to", "with", "on",
+    "by", "from", "is", "are", "was", "at", "or", "as", "its", "be",
+})
+
+
 def _compute_keyword_overlap(
     paper: Paper,
     keywords: ExtractedKeywords,
-) -> float:
-    """Fraction of extracted keywords found in paper title + abstract."""
+) -> tuple[float, int]:
+    """Keyword overlap using three match tiers.
+
+    For each keyword:
+      1. Exact phrase match → full score
+      2. Word-level overlap (for multi-word keywords) → partial score
+      3. Fuzzy match → reduced score
+
+    This bridges the gap between semantic search (which found the paper)
+    and keyword matching (which verifies relevance).
+    Returns (overlap_score, matched_count).
+    """
     paper_text = " ".join(
         filter(None, [paper.title, paper.abstract])
     ).lower()
     if not paper_text:
-        return 0.0
+        return 0.0, 0
 
-    matches = 0
-    total = len(keywords.keywords)
-    if total == 0:
-        return 0.0
+    paper_words = set(paper_text.split())
+    total_weight = sum(score for _kw, score in keywords.keywords)
+    if total_weight == 0:
+        return 0.0, 0
 
-    for kw, _score in keywords.keywords:
+    matched_weight = 0.0
+    matched_count = 0
+    for kw, score in keywords.keywords:
         kw_lower = kw.lower()
-        # Exact substring match or fuzzy match
-        if kw_lower in paper_text:
-            matches += 1
-        elif fuzz.partial_ratio(kw_lower, paper_text) >= 85:
-            matches += 0.5
+        match_level = _match_keyword(kw_lower, paper_text, paper_words)
+        if match_level > 0:
+            matched_weight += score * match_level
+            matched_count += 1
 
-    return min(matches / total, 1.0)
+    return min(matched_weight / total_weight, 1.0), matched_count
+
+
+def _match_keyword(
+    kw: str, paper_text: str, paper_words: set[str],
+) -> float:
+    """Match a single keyword against paper text. Returns 0.0-1.0.
+
+    Tiers:
+      1.0 — exact phrase found in text
+      0.6 — word-level overlap ≥ 50% of keyword words (multi-word only)
+      0.4 — fuzzy match (partial_ratio ≥ 85)
+      0.0 — no match
+    """
+    # Tier 1: exact phrase match
+    if kw in paper_text:
+        return 1.0
+
+    # Tier 2: word-level overlap for multi-word keywords
+    kw_words = [w for w in kw.split() if w not in _STOPWORDS and len(w) > 2]
+    if len(kw_words) > 1:
+        hits = sum(1 for w in kw_words if w in paper_words)
+        if hits / len(kw_words) >= 0.5:
+            return 0.6
+
+    # Tier 3: fuzzy match for longer terms
+    if len(kw) > 5 and fuzz.partial_ratio(kw, paper_text) >= 85:
+        return 0.4
+
+    return 0.0
 
 
 def _compute_recency_score(year: int | None, current_year: int) -> float:

@@ -26,9 +26,8 @@ _LLM_TIMEOUT = httpx.Timeout(connect=15.0, read=180.0, write=15.0, pool=15.0)
 def extract_keywords(document: TexDocument, top_n: int = 15) -> ExtractedKeywords:
     """Extract keywords from a single TeX document.
 
-    Strategy:
-      1. Try LLM extraction first (best for multilingual / domain-specific docs)
-      2. Fall back to NLP ensemble (KeyBERT + YAKE + spaCy)
+    Strategy: Fuse LLM (domain understanding) with NLP (term frequency).
+    Falls back to NLP-only if LLM is unavailable.
 
     Raises:
         KeywordExtractionError: If all methods fail.
@@ -39,7 +38,7 @@ def extract_keywords(document: TexDocument, top_n: int = 15) -> ExtractedKeyword
 
     llm_result = _try_llm_extraction(document.title, text, top_n)
     if llm_result is not None:
-        return llm_result
+        return _fuse_llm_and_nlp(llm_result, text, top_n)
 
     logger.info("LLM extraction unavailable, using NLP ensemble fallback")
     return _extract_ensemble(text, top_n)
@@ -60,11 +59,11 @@ def extract_keywords_from_project(
     if not combined_text.strip():
         raise KeywordExtractionError("No text available for keyword extraction")
 
-    # For single-file or small projects, use standard extraction
+    # For single-file or small projects, use standard extraction with fusion
     if not project.is_multi_file or len(combined_text) <= 8000:
         llm_result = _try_llm_extraction(project.combined_title, combined_text, top_n)
         if llm_result is not None:
-            return llm_result
+            return _fuse_llm_and_nlp(llm_result, combined_text, top_n)
         return _extract_ensemble(combined_text, top_n)
 
     # --- Multi-file context-aware LLM extraction ---
@@ -114,8 +113,8 @@ def extract_keywords_from_project(
         logger.warning("Chunked LLM extraction returned nothing, falling back to ensemble")
         return _extract_ensemble(combined_text[:100_000], top_n)
 
-    # Sort and take top_n
-    ranked = sorted(all_keywords.items(), key=lambda x: x[1], reverse=True)[:top_n]
+    # Re-rank by searchability and take top_n
+    ranked = _rerank_by_searchability(all_keywords)[:top_n]
     logger.info(
         "Merged keywords from %d chapters: %d unique -> top %d",
         n_chunks, len(all_keywords), len(ranked),
@@ -127,22 +126,32 @@ def extract_keywords_from_project(
 # LLM-based extraction
 # ---------------------------------------------------------------------------
 
-_LLM_PROMPT_TEMPLATE = """You are an academic keyword extraction expert. Analyze the following LaTeX document content and extract the most important technical keywords and phrases for searching academic papers.
+_LLM_PROMPT_TEMPLATE = """You are an academic search query expert. Given a LaTeX document, generate search terms to find EXISTING related papers in academic databases.
 
 Document title: {title}
 
 Document content (excerpt):
 {text}
 
-Requirements:
-1. Extract exactly {top_n} keywords/phrases
-2. Keywords MUST be in English (translate if the document is in another language)
-3. Focus on technical terms, methods, algorithms, and domain concepts
-4. Keywords should be suitable for searching academic databases (Semantic Scholar, arXiv, etc.)
-5. Order by relevance (most important first)
-6. Each keyword should be 1-4 words
+CRITICAL DISTINCTION:
+- Do NOT describe what this document does (its unique contributions or novelty)
+- DO identify the established research areas, tools, frameworks, and techniques it builds upon
+- Think: "What papers would the author cite in the Related Work section?"
 
-Return ONLY a JSON array of strings, no explanation. Example: ["deep learning", "transformer architecture", "attention mechanism"]"""
+Requirements:
+1. Extract exactly {top_n} search terms
+2. Terms MUST be in English (translate if the document is in another language)
+3. Prefer SHORT, CONCRETE terms that appear frequently in paper titles:
+   - GOOD: "graph neural network", "batch normalization", "Monte Carlo simulation"
+   - BAD: "our novel optimization strategy", "proposed hybrid framework for X"
+4. Include a mix of:
+   - Named tools/frameworks/datasets used in the field
+   - Established techniques and algorithms
+   - Research subfields and problem domains
+5. Each term should be 1-3 words (max 4 only if it is a well-known phrase)
+6. Order by search priority (most important first)
+
+Return ONLY a JSON array of strings, no explanation."""
 
 _LLM_SUMMARY_PROMPT_TEMPLATE = """You are an academic document analyst. Read the following multi-chapter LaTeX project and produce a concise research summary.
 
@@ -159,7 +168,7 @@ Produce a summary (200-400 words) covering:
 
 Write the summary in English. Be specific about technical terms — these will be used to guide keyword extraction for academic database searches."""
 
-_LLM_CONTEXT_PROMPT_TEMPLATE = """You are an academic keyword extraction expert. You are analyzing a chapter from a multi-file LaTeX project. Use the project summary to understand the full context.
+_LLM_CONTEXT_PROMPT_TEMPLATE = """You are an academic search query expert analyzing a chapter from a multi-file LaTeX project.
 
 Project title: {project_title}
 
@@ -174,17 +183,19 @@ Current chapter: {chapter_title}
 Chapter content (excerpt):
 {text}
 
-Requirements:
-1. Extract exactly {top_n} NEW keywords/phrases from this chapter
-2. DO NOT repeat any keywords from the "already extracted" list above — find complementary terms
-3. Keywords MUST be in English (translate if the document is in another language)
-4. Focus on technical terms, methods, algorithms, and domain concepts unique to this chapter
-5. Consider the project summary to identify domain-specific terms that are important in context
-6. Keywords should be suitable for searching academic databases (Semantic Scholar, arXiv, etc.)
-7. Order by relevance (most important first)
-8. Each keyword should be 1-4 words
+IMPORTANT: Generate terms that will FIND EXISTING PAPERS, not describe this chapter's contribution.
+Ask yourself: "What would I type into Google Scholar to find papers related to this chapter?"
 
-Return ONLY a JSON array of strings, no explanation. Example: ["deep learning", "transformer architecture", "attention mechanism"]"""
+Requirements:
+1. Extract exactly {top_n} NEW search terms from this chapter
+2. DO NOT repeat any keywords from the "already extracted" list above — find complementary terms
+3. Terms MUST be in English (translate if the document is in another language)
+4. Prefer short, concrete terms (1-3 words) that appear in paper titles
+5. Include named tools, frameworks, established techniques, and research subfields
+6. Consider the project context to identify domain-specific terms
+7. Order by search priority (most important first)
+
+Return ONLY a JSON array of strings, no explanation."""
 
 
 def _llm_chat(
@@ -383,8 +394,27 @@ def _parse_llm_response(content: str, top_n: int) -> list[str]:
 # NLP ensemble fallback
 # ---------------------------------------------------------------------------
 
+def _strip_non_latin(text: str) -> str:
+    """Remove non-Latin characters (Chinese, Japanese, etc.) for English NLP models.
+
+    Keeps ASCII, Latin-extended, common punctuation, and whitespace.
+    """
+    cleaned = re.sub(r"[^\u0000-\u024F\s.,;:!?()'\"-]", " ", text)
+    # Collapse multiple spaces
+    return re.sub(r"\s{2,}", " ", cleaned).strip()
+
+
 def _extract_ensemble(text: str, top_n: int) -> ExtractedKeywords:
-    """Fall back to NLP ensemble when LLM is unavailable."""
+    """Fall back to NLP ensemble when LLM is unavailable.
+
+    Strips non-Latin text first since KeyBERT/YAKE/spaCy are English models.
+    """
+    clean_text = _strip_non_latin(text)
+    if len(clean_text) < 100:
+        raise KeywordExtractionError(
+            "Not enough English text for NLP keyword extraction"
+        )
+
     results: dict[str, list[tuple[str, float]]] = {}
     errors: list[str] = []
 
@@ -394,7 +424,7 @@ def _extract_ensemble(text: str, top_n: int) -> ExtractedKeywords:
         ("spacy", _extract_spacy_noun_phrases),
     ):
         try:
-            results[name] = fn(text, top_n=top_n)
+            results[name] = fn(clean_text, top_n=top_n)
             logger.debug("%s returned %d keywords", name, len(results[name]))
         except Exception as exc:
             logger.warning("%s extraction failed: %s", name, exc)
@@ -418,6 +448,87 @@ def _extract_ensemble(text: str, top_n: int) -> ExtractedKeywords:
     )
     logger.info("Extracted %d keywords (ensemble)", len(merged))
     return ExtractedKeywords(keywords=merged, source_method="ensemble")
+
+
+_FUSION_WEIGHT_LLM = 0.6
+_FUSION_WEIGHT_NLP = 0.4
+_FUSION_OVERLAP_BOOST = 1.5
+
+
+def _fuse_llm_and_nlp(
+    llm_result: ExtractedKeywords,
+    text: str,
+    top_n: int,
+) -> ExtractedKeywords:
+    """Fuse LLM keywords (domain understanding) with NLP keywords (term frequency).
+
+    Keywords appearing in both sources get a 1.5x boost.
+    Returns LLM result unchanged if NLP ensemble fails.
+    """
+    try:
+        nlp_result = _extract_ensemble(text, top_n)
+    except KeywordExtractionError:
+        logger.info("NLP ensemble failed during fusion, returning LLM-only result")
+        return llm_result
+
+    merged: dict[str, float] = defaultdict(float)
+
+    for kw, score in llm_result.keywords:
+        merged[kw.lower().strip()] += _FUSION_WEIGHT_LLM * score
+    for kw, score in nlp_result.keywords:
+        merged[kw.lower().strip()] += _FUSION_WEIGHT_NLP * score
+
+    # Boost keywords found in both sources
+    llm_set = {kw.lower().strip() for kw, _ in llm_result.keywords}
+    nlp_set = {kw.lower().strip() for kw, _ in nlp_result.keywords}
+    for kw in llm_set & nlp_set:
+        merged[kw] *= _FUSION_OVERLAP_BOOST
+
+    reranked = _rerank_by_searchability(merged)
+    top = reranked[:top_n]
+    logger.info(
+        "Fused %d LLM + %d NLP keywords -> %d (overlap: %d boosted)",
+        len(llm_result.keywords), len(nlp_result.keywords),
+        len(top), len(llm_set & nlp_set),
+    )
+    return ExtractedKeywords(keywords=tuple(top), source_method="llm+nlp")
+
+
+def _rerank_by_searchability(
+    scored: dict[str, float],
+) -> list[tuple[str, float]]:
+    """Re-rank keywords by searchability: boost terms likely to return results.
+
+    Heuristic multipliers:
+      - All-uppercase (acronyms like MLIR, GAN): 1.4x — almost always searchable
+      - Short terms (≤6 chars): 1.2x — likely established names
+      - 2-3 word phrases: 1.0x — neutral
+      - Long single words (>10 chars): 0.7x — often niche/internal
+      - Long phrases (>4 words): 0.7x — too specific for search
+    """
+    adjusted: list[tuple[str, float]] = []
+    for kw, score in scored.items():
+        words = kw.split()
+        word_count = len(words)
+
+        if word_count == 1:
+            if kw.isupper():
+                multiplier = 1.4
+            elif len(kw) <= 6:
+                multiplier = 1.2
+            elif len(kw) > 10:
+                multiplier = 0.7
+            else:
+                multiplier = 1.0
+        elif word_count > 4:
+            multiplier = 0.7
+        else:
+            multiplier = 1.0
+
+        adjusted.append((kw, score * multiplier))
+
+    adjusted.sort(key=lambda x: x[1], reverse=True)
+    return adjusted
 
 
 def _build_weighted_text(document: TexDocument) -> str:

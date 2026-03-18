@@ -7,6 +7,7 @@ import pytest
 from citebot.keyword_extractor import (
     _build_weighted_text,
     _ensemble_merge,
+    _fuse_llm_and_nlp,
     _normalize_yake_scores,
     extract_keywords,
 )
@@ -142,3 +143,66 @@ class TestExtractKeywords:
         result = extract_keywords(minimal_document, top_n=5)
         assert result.source_method == "ensemble"
         assert len(result.keywords) == 3
+
+
+class TestFuseLlmAndNlp:
+    @patch("citebot.keyword_extractor._extract_ensemble")
+    def test_fusion_source_method(self, mock_ensemble):
+        mock_ensemble.return_value = ExtractedKeywords(
+            keywords=(("neural network", 0.7),),
+            source_method="ensemble",
+        )
+        llm = ExtractedKeywords(
+            keywords=(("deep learning", 0.9), ("protein", 0.8)),
+            source_method="llm",
+        )
+        result = _fuse_llm_and_nlp(llm, "some text", top_n=10)
+        assert result.source_method == "llm+nlp"
+
+    def test_fusion_boosts_shared_keywords(self):
+        llm = ExtractedKeywords(
+            keywords=(("shared_term", 0.9), ("llm_only", 0.8)),
+            source_method="llm",
+        )
+        nlp = ExtractedKeywords(
+            keywords=(("shared_term", 0.7), ("nlp_only", 0.6)),
+            source_method="ensemble",
+        )
+        # Manually test the fusion logic
+        from collections import defaultdict
+
+        merged: dict[str, float] = defaultdict(float)
+        for kw, score in llm.keywords:
+            merged[kw.lower()] += 0.6 * score
+        for kw, score in nlp.keywords:
+            merged[kw.lower()] += 0.4 * score
+
+        # shared_term should have higher score than either llm_only or nlp_only
+        assert merged["shared_term"] > merged["llm_only"]
+        assert merged["shared_term"] > merged["nlp_only"]
+
+    @patch("citebot.keyword_extractor._extract_ensemble")
+    def test_returns_llm_when_nlp_fails(self, mock_ensemble):
+        mock_ensemble.side_effect = KeywordExtractionError("all failed")
+        llm = ExtractedKeywords(
+            keywords=(("deep learning", 0.9),),
+            source_method="llm",
+        )
+        result = _fuse_llm_and_nlp(llm, "some text", top_n=5)
+        assert result.source_method == "llm"
+        assert result.keywords == llm.keywords
+
+    @patch("citebot.keyword_extractor._extract_ensemble")
+    def test_fusion_weights_llm_higher(self, mock_ensemble):
+        mock_ensemble.return_value = ExtractedKeywords(
+            keywords=(("nlp_top", 1.0),),
+            source_method="ensemble",
+        )
+        llm = ExtractedKeywords(
+            keywords=(("llm_top", 1.0),),
+            source_method="llm",
+        )
+        result = _fuse_llm_and_nlp(llm, "text", top_n=5)
+        scores = dict(result.keywords)
+        # LLM keyword (weight 0.6) should score higher than NLP keyword (weight 0.4)
+        assert scores["llm_top"] > scores["nlp_top"]

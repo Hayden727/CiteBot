@@ -47,11 +47,13 @@ citebot/
 - **Immutability**: All CiteBot data types are frozen dataclasses. Never mutate — use `dataclasses.replace()`.
 - **Multi-file support**: `parse_tex_project()` recursively resolves `\input{}`/`\include{}`, searches `chapters/`, `sections/`, `content/`, `tex/` subdirs. `TexProject` aggregates main + child `TexDocument`s.
 - **Async boundary**: `pipeline.run_pipeline()` calls `asyncio.run()` — only search and BibTeX fetch are async.
-- **LLM-first keywords**: Calls DeepSeek/OpenAI API via httpx. For multi-file projects, extracts per-chapter then merges (supports 100+ keywords). Falls back to NLP ensemble (KeyBERT 0.5 + YAKE 0.3 + spaCy 0.2).
-- **Scaled search**: Query count auto-scales with keyword count: `max(5, num_keywords // 3)`.
-- **Scoring weights**: keyword_overlap 0.40, citation_score 0.25, recency_score 0.20, abstract_match 0.15.
+- **LLM+NLP fusion keywords**: LLM extracts domain-aware terms (weight 0.6), NLP ensemble extracts high-frequency terms (weight 0.4), shared terms get 1.5x boost. LLM prompt focuses on finding searchable related-work terms, not describing thesis contributions. Falls back to NLP-only if LLM unavailable.
+- **Multi-file context engineering**: LLM generates project summary first, then per-chapter extraction with cumulative context (avoids duplicates). Multi-file chunked path uses LLM-only for performance.
+- **Three-tier search queries**: Broad (unquoted short keywords), Medium (short + quoted phrase), Targeted (quoted phrases). Technical single-word terms allowed; generic words filtered via `_GENERIC_SINGLE_WORDS` set.
+- **Scoring weights**: keyword_overlap 0.50, citation_score 0.15, recency_score 0.15, abstract_match 0.20.
+- **Relevance filtering**: Papers need keyword_overlap ≥ 0.15 AND ≥ 2 distinct keyword matches (relaxed to 1 match when < 5 keywords).
 - **Graceful degradation**: If LLM fails, fall back to NLP. If one search source fails, continue with remaining.
-- **Multi-file cite insertion**: `insert_citations_project()` iterates all docs, inserts into each, writes `.cited.tex` per file.
+- **Multi-file cite insertion**: `insert_citations_project()` writes `.cited.tex` for all files, rewrites `\input`/`\include` paths in main file to point to `.cited` versions. Only main file gets bibliography commands.
 
 ## Testing
 
@@ -59,7 +61,7 @@ citebot/
 conda run -n citebot python -m pytest tests/ -v --cov=citebot
 ```
 
-85 tests. Mock Paper objects in `tests/conftest.py`. Multi-file tests in `tests/test_multi_file.py`.
+108 tests. Mock Paper objects in `tests/conftest.py`. Multi-file tests in `tests/test_multi_file.py`. Search query tests in `tests/test_literature_searcher.py`.
 
 ## Dependencies
 

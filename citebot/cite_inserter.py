@@ -20,11 +20,16 @@ def insert_citations(
     document: TexDocument,
     scored_papers: tuple[ScoredPaper, ...],
     bib_filename: str = "references",
+    is_main_file: bool = True,
 ) -> str:
     """Insert \\cite{} references into the .tex source.
 
     Returns the modified .tex content as a new string (immutable).
     Does NOT write to disk — caller decides.
+
+    Args:
+        is_main_file: If True, adds bibliography commands before \\end{document}.
+                      Child files in multi-file projects should pass False.
     """
     tex_content = Path(document.file_path).read_text(encoding="utf-8")
 
@@ -33,11 +38,13 @@ def insert_citations(
 
     if insertions:
         tex_content = _insert_at_positions(tex_content, insertions)
-        logger.info("Inserted %d citation(s) into document", len(insertions))
+        logger.info("Inserted %d citation(s) into %s", len(insertions), document.file_path)
     else:
-        logger.info("No suitable citation points found")
+        logger.info("No suitable citation points found in %s", document.file_path)
 
-    tex_content = _ensure_bibliography_command(tex_content, bib_filename)
+    if is_main_file:
+        tex_content = _ensure_bibliography_command(tex_content, bib_filename)
+
     return tex_content
 
 
@@ -48,19 +55,27 @@ def insert_citations_project(
 ) -> list[str]:
     """Insert citations into all files of a multi-file project.
 
+    For multi-file projects:
+      - All files get .cited.tex output for project consistency
+      - The main file's \\input/\\include paths are rewritten to .cited versions
+      - Only the main file gets bibliography commands
+
     Returns list of written .cited.tex file paths.
     """
     written: list[str] = []
+    main_path = project.main_doc.file_path
 
     for doc in project.all_docs:
-        modified = insert_citations(doc, scored_papers, bib_filename)
-        # Only write if something was actually changed
-        original_content = Path(doc.file_path).read_text(encoding="utf-8")
-        if modified != original_content:
-            path = write_modified_tex(modified, doc.file_path)
-            written.append(path)
+        is_main = doc.file_path == main_path
+        modified = insert_citations(doc, scored_papers, bib_filename, is_main_file=is_main)
 
-    logger.info("Inserted citations into %d/%d files", len(written), len(project.all_docs))
+        if is_main and project.is_multi_file:
+            modified = _rewrite_includes_to_cited(modified)
+
+        path = write_modified_tex(modified, doc.file_path)
+        written.append(path)
+
+    logger.info("Wrote .cited.tex for %d/%d files", len(written), len(project.all_docs))
     return written
 
 
@@ -89,8 +104,8 @@ def _find_citation_points(
 
     Returns list of (position, [cite_keys]) sorted by position descending.
     """
-    # Find section boundaries in the raw tex
-    section_pattern = r"\\section\{[^}]*\}"
+    # Find section boundaries in the raw tex (all levels)
+    section_pattern = r"\\(?:chapter|section|subsection|subsubsection)\{[^}]*\}"
     section_matches = list(re.finditer(section_pattern, tex_content))
 
     if not section_matches:
@@ -219,6 +234,28 @@ def _insert_at_positions(
             result = result[:pos] + cite_cmd + result[pos:]
 
     return result
+
+
+def _rewrite_includes_to_cited(tex_content: str) -> str:
+    """Rewrite \\input{file} and \\include{file} to point to .cited versions.
+
+    E.g. \\input{chapters/chap01} → \\input{chapters/chap01.cited}
+         \\input{chapters/chap01.tex} → \\input{chapters/chap01.cited.tex}
+    """
+    def _replace_include(m: re.Match) -> str:
+        cmd = m.group(1)   # "input" or "include"
+        path = m.group(2)  # the file path
+        if path.endswith(".tex"):
+            new_path = path[:-4] + ".cited.tex"
+        else:
+            new_path = path + ".cited"
+        return f"\\{cmd}{{{new_path}}}"
+
+    return re.sub(
+        r"\\(input|include)\{([^}]+)\}",
+        _replace_include,
+        tex_content,
+    )
 
 
 def _ensure_bibliography_command(

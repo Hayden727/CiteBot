@@ -8,6 +8,8 @@ import os
 import re
 from collections import defaultdict
 
+import httpx
+
 from citebot.types import ExtractedKeywords, KeywordExtractionError, TexDocument, TexProject
 
 logger = logging.getLogger(__name__)
@@ -16,6 +18,9 @@ logger = logging.getLogger(__name__)
 _WEIGHT_KEYBERT = 0.5
 _WEIGHT_YAKE = 0.3
 _WEIGHT_SPACY = 0.2
+
+# LLM API timeout: generous read timeout for long document analysis
+_LLM_TIMEOUT = httpx.Timeout(connect=15.0, read=180.0, write=15.0, pool=15.0)
 
 
 def extract_keywords(document: TexDocument, top_n: int = 15) -> ExtractedKeywords:
@@ -62,14 +67,18 @@ def extract_keywords_from_project(
             return llm_result
         return _extract_ensemble(combined_text, top_n)
 
-    # --- Multi-file chunked LLM extraction ---
+    # --- Multi-file context-aware LLM extraction ---
     api_key, base_url, model = _resolve_llm_config()
     if not api_key:
         logger.info("No LLM API for chunked extraction, using ensemble on combined text")
         return _extract_ensemble(combined_text[:100_000], top_n)
 
-    # Extract per-chapter keywords, then merge
+    # Step 1: LLM generates a project summary for global context
+    project_summary = _generate_project_summary(project, api_key, base_url, model)
+
+    # Step 2: Extract per-chapter keywords with cumulative context
     all_keywords: dict[str, float] = defaultdict(float)
+    extracted_so_far: list[str] = []
     n_chunks = 0
 
     for doc in project.all_docs:
@@ -77,19 +86,26 @@ def extract_keywords_from_project(
             continue
 
         chapter_title = doc.title or "Untitled Chapter"
-        # Each chapter gets a proportional share of keywords
         per_chapter_n = max(top_n // max(len(project.all_docs), 1), 10)
 
-        result = _try_llm_extraction(
-            f"{project.combined_title} - {chapter_title}",
-            doc.full_text,
-            per_chapter_n,
+        result = _try_llm_context_extraction(
+            project_title=project.combined_title,
+            project_summary=project_summary,
+            chapter_title=chapter_title,
+            chapter_text=doc.full_text,
+            existing_keywords=extracted_so_far,
+            top_n=per_chapter_n,
+            api_key=api_key,
+            base_url=base_url,
+            model=model,
         )
         if result is not None:
             n_chunks += 1
             for kw, score in result.keywords:
                 key = kw.lower().strip()
                 all_keywords[key] = max(all_keywords[key], score)
+                if key not in extracted_so_far:
+                    extracted_so_far.append(key)
             logger.debug(
                 "Chapter %r: %d keywords", chapter_title[:30], len(result.keywords)
             )
@@ -128,6 +144,117 @@ Requirements:
 
 Return ONLY a JSON array of strings, no explanation. Example: ["deep learning", "transformer architecture", "attention mechanism"]"""
 
+_LLM_SUMMARY_PROMPT_TEMPLATE = """You are an academic document analyst. Read the following multi-chapter LaTeX project and produce a concise research summary.
+
+Project title: {title}
+
+Document content (combined excerpt from all chapters):
+{text}
+
+Produce a summary (200-400 words) covering:
+1. The main research topic and objectives
+2. Key methods, algorithms, or frameworks used
+3. The domain and subfields involved
+4. Core contributions or findings
+
+Write the summary in English. Be specific about technical terms — these will be used to guide keyword extraction for academic database searches."""
+
+_LLM_CONTEXT_PROMPT_TEMPLATE = """You are an academic keyword extraction expert. You are analyzing a chapter from a multi-file LaTeX project. Use the project summary to understand the full context.
+
+Project title: {project_title}
+
+Project summary:
+{project_summary}
+
+Keywords already extracted from previous chapters:
+{existing_keywords}
+
+Current chapter: {chapter_title}
+
+Chapter content (excerpt):
+{text}
+
+Requirements:
+1. Extract exactly {top_n} NEW keywords/phrases from this chapter
+2. DO NOT repeat any keywords from the "already extracted" list above — find complementary terms
+3. Keywords MUST be in English (translate if the document is in another language)
+4. Focus on technical terms, methods, algorithms, and domain concepts unique to this chapter
+5. Consider the project summary to identify domain-specific terms that are important in context
+6. Keywords should be suitable for searching academic databases (Semantic Scholar, arXiv, etc.)
+7. Order by relevance (most important first)
+8. Each keyword should be 1-4 words
+
+Return ONLY a JSON array of strings, no explanation. Example: ["deep learning", "transformer architecture", "attention mechanism"]"""
+
+
+def _llm_chat(
+    api_key: str,
+    base_url: str,
+    model: str,
+    prompt: str,
+    max_tokens: int = 1024,
+) -> str | None:
+    """Send a chat completion request to an OpenAI-compatible API.
+
+    Returns the response content string, or None on failure.
+    """
+    try:
+        response = httpx.post(
+            f"{base_url}/chat/completions",
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "model": model,
+                "messages": [{"role": "user", "content": prompt}],
+                "temperature": 0.1,
+                "max_tokens": max_tokens,
+            },
+            timeout=_LLM_TIMEOUT,
+        )
+        response.raise_for_status()
+        return response.json()["choices"][0]["message"]["content"].strip()
+    except Exception as exc:
+        logger.warning("LLM API call failed: %s", exc)
+        return None
+
+
+def _generate_project_summary(
+    project: TexProject,
+    api_key: str,
+    base_url: str,
+    model: str,
+) -> str:
+    """Use LLM to generate a research summary of the entire project.
+
+    Collects excerpts from each chapter and asks the LLM to produce
+    a concise summary that captures the project's scope and methods.
+    Returns empty string on failure (non-critical).
+    """
+    chapter_excerpts: list[str] = []
+    for doc in project.all_docs:
+        if not doc.full_text or len(doc.full_text.strip()) < 100:
+            continue
+        label = doc.title or "Untitled"
+        chapter_excerpts.append(f"[{label}]\n{doc.full_text[:2000]}")
+
+    combined_excerpt = "\n\n---\n\n".join(chapter_excerpts)[:12000]
+
+    prompt = _LLM_SUMMARY_PROMPT_TEMPLATE.format(
+        title=project.combined_title,
+        text=combined_excerpt,
+    )
+
+    logger.info("Generating project summary via LLM...")
+    content = _llm_chat(api_key, base_url, model, prompt, max_tokens=1024)
+    if content:
+        logger.info("Project summary generated (%d chars)", len(content))
+        return content
+
+    logger.warning("Failed to generate project summary, continuing without it")
+    return ""
+
 
 def _try_llm_extraction(
     title: str,
@@ -146,45 +273,66 @@ def _try_llm_extraction(
         logger.debug("No LLM API key configured, skipping LLM extraction")
         return None
 
-    try:
-        import httpx
+    prompt = _LLM_PROMPT_TEMPLATE.format(
+        title=title,
+        text=full_text[:6000],
+        top_n=top_n,
+    )
 
-        text_excerpt = full_text[:6000]
-        prompt = _LLM_PROMPT_TEMPLATE.format(
-            title=title,
-            text=text_excerpt,
-            top_n=top_n,
+    content = _llm_chat(api_key, base_url, model, prompt)
+    if content is None:
+        return None
+
+    keywords = _parse_llm_response(content, top_n)
+    if keywords:
+        logger.info("LLM extracted %d keywords: %s", len(keywords), keywords[:5])
+        scored = tuple(
+            (kw, 1.0 - i / len(keywords))
+            for i, kw in enumerate(keywords)
         )
+        return ExtractedKeywords(keywords=scored, source_method="llm")
 
-        response = httpx.post(
-            f"{base_url}/chat/completions",
-            headers={
-                "Authorization": f"Bearer {api_key}",
-                "Content-Type": "application/json",
-            },
-            json={
-                "model": model,
-                "messages": [{"role": "user", "content": prompt}],
-                "temperature": 0.1,
-                "max_tokens": 1024,
-            },
-            timeout=30.0,
+    return None
+
+
+def _try_llm_context_extraction(
+    project_title: str,
+    project_summary: str,
+    chapter_title: str,
+    chapter_text: str,
+    existing_keywords: list[str],
+    top_n: int,
+    api_key: str,
+    base_url: str,
+    model: str,
+) -> ExtractedKeywords | None:
+    """Extract keywords from a chapter with project context and dedup awareness."""
+    kw_display = ", ".join(existing_keywords) if existing_keywords else "(none yet)"
+
+    prompt = _LLM_CONTEXT_PROMPT_TEMPLATE.format(
+        project_title=project_title,
+        project_summary=project_summary or "(summary unavailable)",
+        existing_keywords=kw_display,
+        chapter_title=chapter_title,
+        text=chapter_text[:6000],
+        top_n=top_n,
+    )
+
+    content = _llm_chat(api_key, base_url, model, prompt)
+    if content is None:
+        return None
+
+    keywords = _parse_llm_response(content, top_n)
+    if keywords:
+        logger.info(
+            "LLM context-extracted %d keywords from %r: %s",
+            len(keywords), chapter_title[:30], keywords[:5],
         )
-        response.raise_for_status()
-
-        content = response.json()["choices"][0]["message"]["content"].strip()
-        keywords = _parse_llm_response(content, top_n)
-
-        if keywords:
-            logger.info("LLM extracted %d keywords: %s", len(keywords), keywords[:5])
-            scored = tuple(
-                (kw, 1.0 - i / len(keywords))
-                for i, kw in enumerate(keywords)
-            )
-            return ExtractedKeywords(keywords=scored, source_method="llm")
-
-    except Exception as exc:
-        logger.warning("LLM extraction failed: %s", exc)
+        scored = tuple(
+            (kw, 1.0 - i / len(keywords))
+            for i, kw in enumerate(keywords)
+        )
+        return ExtractedKeywords(keywords=scored, source_method="llm")
 
     return None
 
